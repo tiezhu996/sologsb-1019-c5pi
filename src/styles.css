@@ -179,3 +179,51 @@ kbd { justify-self: start; padding: 3px 7px; border: 1px solid #ccd4cf; border-b
 .citation-link:hover { border-color: #9dbbb3; background: #f0f6f2; }
 .citation-link span { color: #788983; font-size: 9px; }
 .citation-link p { margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+
+/* ---------- 离线编码包 / 合并 ---------- */
+.offline-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 24px; color: #f3ecd9; background: #1f5f55; }
+.offline-banner > div:first-child { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.offline-banner span { opacity: .82; }
+.checkpoint-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 24px; color: #fff7e7; background: #7a5417; }
+.checkpoint-banner > div:first-child { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.checkpoint-banner span { opacity: .85; }
+.package-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 12px 0 4px; }
+.package-tabs button { padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: #f2f4f1; color: var(--muted); font-size: 12px; font-weight: 700; }
+.package-tabs button.active { color: var(--forest); background: #e3efe9; border-color: #93bcb1; }
+.package-actions { margin-top: 14px; }
+.package-file { display: block; margin-top: 10px; padding: 18px; border: 1px dashed #a9bcb5; border-radius: 10px; background: #f6f9f7; font-size: 12px; color: var(--muted); }
+.package-file input[type="file"] { width: 100%; }
+.merge-dialog { width: min(820px, 100%); }
+.merge-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.merge-summary-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.merge-note { margin-top: 10px; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 100px; background: #e6ebe7; color: #5c6b65; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.tag-ok { background: #ddebe2; color: #2f6a4b; }
+.tag-warn { background: #f8e4cb; color: #8a5a22; }
+.merge-section { border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; background: #f8faf8; }
+.merge-section h4 { margin: 0 0 8px; font-family: "Songti SC", serif; font-size: 13px; color: var(--forest-dark); }
+.merge-hint { margin: 0 0 8px; color: var(--muted); font-size: 11px; }
+.migration-list { display: grid; gap: 5px; max-height: 150px; overflow: auto; }
+.migration-item { display: flex; gap: 8px; align-items: baseline; font-size: 11px; line-height: 1.5; color: #465a55; }
+.merge-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.merge-stats > div { padding: 10px; border-radius: 9px; background: #f1f4f1; text-align: center; }
+.merge-stats strong { display: block; font-family: "Songti SC", serif; font-size: 20px; color: var(--forest); }
+.merge-stats span { font-size: 10px; color: var(--muted); }
+.merge-stats .stat-conflict.active { background: #fbeae4; }
+.merge-stats .stat-conflict.active strong { color: var(--danger); }
+.path-list { display: grid; gap: 4px; max-height: 170px; overflow: auto; }
+.path-item { padding: 5px 8px; border-radius: 6px; background: #e8f1ec; font-size: 11px; color: #2c544b; }
+.path-item.muted-path { background: #f1efe8; color: #6f6242; }
+.conflict-list { display: grid; gap: 10px; max-height: 330px; overflow: auto; }
+.conflict-card { border: 1px solid #e6d2c8; border-radius: 10px; padding: 10px 12px; background: #fff; }
+.conflict-card.resolved { border-color: #a7cbb8; background: #f5faf7; }
+.conflict-head { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.conflict-where { color: var(--muted); }
+.avatar-mini { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #fff; background: #9d6841; font-size: 10px; }
+.conflict-quote { margin: 6px 0; padding-left: 28px; color: #47352c; font-family: "Songti SC", serif; font-size: 12px; line-height: 1.5; }
+.conflict-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.conflict-options label { display: flex; gap: 7px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fafbf9; font-size: 11px; cursor: pointer; }
+.conflict-options label.picked { border-color: #8fb3a8; background: #eaf3ef; }
+.conflict-options label small { display: block; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+.conflict-base { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.merge-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }

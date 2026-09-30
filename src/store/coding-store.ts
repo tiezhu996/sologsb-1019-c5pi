@@ -1,10 +1,37 @@
 import { createEffect, createSignal } from 'solid-js';
 import { createStore, reconcile, unwrap } from 'solid-js/store';
 import { seedState } from '../data/seed';
-import type { CoderId, CodingState, PersistedEnvelope, Segment, Theme } from '../types';
+import type {
+  CheckpointHistoryEntry,
+  CoderId,
+  CodingPackage,
+  CodingState,
+  MergeCheckpoint,
+  MergePlan,
+  PersistedEnvelope,
+  Segment,
+  Theme
+} from '../types';
 import { readEnvelope, writeEnvelope } from '../utils/db';
+import {
+  applyMergeToDraft,
+  buildMergePlan,
+  buildMigration,
+  clearPendingCheckpoint,
+  discardPendingCheckpoint,
+  downloadPackage,
+  issuePackage,
+  listCheckpointHistory,
+  loadPendingCheckpoint,
+  markCheckpointRolledBack,
+  parsePackage,
+  saveCheckpoint,
+  summarizePackage,
+  unresolvedConflictCount
+} from '../utils/merge';
 
 const STORAGE_KEY = 'sologsb-1019-state-v1';
+const OFFLINE_PREVIOUS_KEY = 'sologsb-1019-offline-previous-v1';
 const TAB_ID = crypto.randomUUID();
 
 const loadLocal = (): CodingState => {
@@ -17,7 +44,7 @@ const loadLocal = (): CodingState => {
   return seedState();
 };
 
-const cloneState = (state: CodingState): CodingState => structuredClone(unwrap(state));
+const cloneState = <T,>(value: T): T => structuredClone(unwrap(value) as T);
 
 const [state, setState] = createStore<CodingState>(loadLocal());
 const [undoStack, setUndoStack] = createSignal<CodingState[]>([]);
@@ -25,24 +52,32 @@ const [redoStack, setRedoStack] = createSignal<CodingState[]>([]);
 const [remoteEnvelope, setRemoteEnvelope] = createSignal<PersistedEnvelope | null>(null);
 const [storageReady, setStorageReady] = createSignal(false);
 const [lastSavedAt, setLastSavedAt] = createSignal<Date | null>(null);
+const [offlineSession, setOfflineSession] = createSignal<{ coderName: string; issuedAt: string } | null>(null);
+const [mergePlan, setMergePlan] = createSignal<MergePlan | null>(null);
+const [mergeError, setMergeError] = createSignal<string | null>(null);
+const [pendingCheckpoint, setPendingCheckpoint] = createSignal<MergeCheckpoint | null>(null);
+const [checkpointHistory, setCheckpointHistory] = createSignal<CheckpointHistoryEntry[]>([]);
 let channel: BroadcastChannel | null = null;
 let hydrating = false;
 let saveTimer: number | undefined;
 
+const persistNow = async (snapshot: CodingState) => {
+  window.clearTimeout(saveTimer);
+  const envelope: PersistedEnvelope = {
+    revision: snapshot.revision,
+    updatedAt: snapshot.updatedAt,
+    writerId: TAB_ID,
+    state: snapshot
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  await writeEnvelope(envelope);
+  setLastSavedAt(new Date());
+  channel?.postMessage(envelope);
+};
+
 const persist = (snapshot: CodingState) => {
   window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(async () => {
-    const envelope: PersistedEnvelope = {
-      revision: snapshot.revision,
-      updatedAt: snapshot.updatedAt,
-      writerId: TAB_ID,
-      state: snapshot
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-    await writeEnvelope(envelope);
-    setLastSavedAt(new Date());
-    channel?.postMessage(envelope);
-  }, 180);
+  saveTimer = window.setTimeout(() => { void persistNow(snapshot); }, 180);
 };
 
 createEffect(() => {
@@ -98,6 +133,26 @@ export function useCodingStore() {
       }
     } finally {
       setStorageReady(true);
+    }
+
+    if (state.offlineBase) setOfflineSession({ coderName: '', issuedAt: state.offlineBase.issuedAt });
+    setCheckpointHistory(listCheckpointHistory());
+    setPendingCheckpoint(await loadPendingCheckpoint());
+
+    // 旧数据迁移：为缺失来源/原文指纹的记录补算一次
+    const migrated = cloneState(state);
+    const items = await buildMigration(migrated.transcripts, migrated.segments);
+    if (items.some((item) => item.backfilled)) {
+      migrated.revision = state.revision + 1;
+      migrated.updatedAt = new Date().toISOString();
+      migrated.audit.unshift({
+        id: crypto.randomUUID(),
+        at: migrated.updatedAt,
+        action: '迁移旧数据',
+        detail: `补算 ${items.filter((item) => item.backfilled).length} 条来源/原文指纹`
+      });
+      setState(reconcile(migrated, { merge: false }));
+      await persistNow(migrated);
     }
 
     if ('BroadcastChannel' in window) {
@@ -312,6 +367,180 @@ export function useCodingStore() {
     setRemoteEnvelope(null);
   };
 
+  /* ---------------- 离线编码包 ---------------- */
+
+  const sendOfflinePackage = async (coderName: string) => {
+    const pkg = await issuePackage(cloneState(state), coderName);
+    downloadPackage(pkg);
+  };
+
+  /** 在编码员自己的电脑上打开工作包：载入 work 快照，记录离开主库时的现场 */
+  const openOfflinePackage = async (raw: string): Promise<string> => {
+    const pkg = parsePackage(raw);
+    if (!state.offlineBase) localStorage.setItem(OFFLINE_PREVIOUS_KEY, JSON.stringify(cloneState(state)));
+    const work = cloneState(pkg.work) as CodingState;
+    work.revision = pkg.work.revision;
+    work.updatedAt = pkg.work.updatedAt;
+    work.activeTranscriptId = pkg.work.transcripts[0]?.id ?? '';
+    work.activeSegmentId = pkg.work.segments[0]?.id ?? '';
+    work.activeThemeId = pkg.work.themes[0]?.id ?? '';
+    work.audit = state.audit;
+    work.offlineBase = pkg.base ? { revision: pkg.base.revision, issuedAt: pkg.issuedAt, base: pkg.base } : null;
+    setUndoStack([]);
+    setRedoStack([]);
+    setState(reconcile(work, { merge: false }));
+    setOfflineSession({ coderName: pkg.coderName ?? '', issuedAt: pkg.issuedAt });
+    await persistNow(work);
+    return summarizePackage(pkg);
+  };
+
+  /** 编码员完工：导出保持 base 不变、work 为当前成果的工作包 */
+  const returnOfflinePackage = async () => {
+    const offlineBase = state.offlineBase;
+    if (!offlineBase) throw new Error('当前不是从带基线的工作包进入的离线模式，无法生成带回包');
+    const coderName = offlineSession()?.coderName;
+    const returnedAt = new Date().toISOString();
+    const pkg: CodingPackage = {
+      kind: 'coding-package',
+      packageVersion: 1,
+      issuedAt: offlineBase.issuedAt,
+      returnedAt,
+      coderName: coderName || undefined,
+      base: offlineBase.base,
+      work: {
+        revision: state.revision,
+        updatedAt: state.updatedAt,
+        coderA: state.coderA,
+        coderB: state.coderB,
+        transcripts: structuredClone(state.transcripts),
+        segments: structuredClone(state.segments),
+        themes: structuredClone(state.themes)
+      }
+    };
+    downloadPackage(pkg, `离线编码包-完成-${(coderName || '编码员')}-${returnedAt.slice(0, 10)}.json`);
+  };
+
+  /** 编码员电脑上退出离线模式：回到打开工作包之前该电脑自己的库 */
+  const exitOfflineSession = async () => {
+    const previous = localStorage.getItem(OFFLINE_PREVIOUS_KEY);
+    setOfflineSession(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    if (previous) {
+      localStorage.removeItem(OFFLINE_PREVIOUS_KEY);
+      const restored = JSON.parse(previous) as CodingState;
+      setState(reconcile(restored, { merge: false }));
+      await persistNow(restored);
+    }
+  };
+
+  /* ---------------- 合并编码包 ---------------- */
+
+  const importReturnedPackage = async (raw: string, fileName: string): Promise<MergePlan> => {
+    const pkg = parsePackage(raw);
+    const plan = await buildMergePlan(cloneState(state), pkg);
+    setMergePlan(plan);
+    setMergeError(null);
+    const checkpoint: MergeCheckpoint = {
+      id: `cp-${crypto.randomUUID()}`,
+      kind: 'merge',
+      packageFileName: fileName,
+      packageSummary: summarizePackage(pkg),
+      createdAt: new Date().toISOString(),
+      before: cloneState(state),
+      plan
+    };
+    await saveCheckpoint(checkpoint);
+    setPendingCheckpoint(checkpoint);
+    return plan;
+  };
+
+  const resolveConflict = (index: number, resolution: 'local' | 'incoming') => {
+    const plan = mergePlan();
+    if (!plan || !plan.conflicts[index]) return;
+    const next = structuredClone(plan);
+    next.conflicts[index].resolution = resolution;
+    setMergePlan(next);
+    const current = pendingCheckpoint();
+    if (current) {
+      const updated = { ...current, plan: next };
+      setPendingCheckpoint(updated);
+      void saveCheckpoint(updated);
+    }
+  };
+
+  /** 应用合并：写入双存储；任一步失败都保留检查点，可恢复后重试或整包撤回 */
+  const applyImportedPackage = async (): Promise<{ ok: true; counts: ReturnType<typeof applyMergeToDraft> } | { ok: false; error: string }> => {
+    const plan = mergePlan();
+    if (!plan) return { ok: false, error: '没有待应用的合并计划' };
+    const remaining = unresolvedConflictCount(plan);
+    if (remaining > 0) return { ok: false, error: `还有 ${remaining} 处编码分歧等待研究者裁决` };
+
+    const pending = await loadPendingCheckpoint();
+    const before = pending?.before ?? cloneState(state);
+    const next = structuredClone(before);
+    const counts = applyMergeToDraft(next, plan);
+    next.revision = before.revision + 1;
+    next.updatedAt = new Date().toISOString();
+    next.audit.unshift({
+      id: crypto.randomUUID(),
+      at: next.updatedAt,
+      action: '合并离线编码包',
+      detail: `${plan.pkg.coderName ?? '编码员'}：新主题 ${counts.themes}、新访谈 ${counts.transcripts}、新片段 ${counts.segments}、判断 ${counts.judgments}`
+    });
+    next.audit = next.audit.slice(0, 250);
+
+    try {
+      setUndoStack((items) => [...items.slice(-49), cloneState(state)]);
+      setRedoStack([]);
+      setState(reconcile(next, { merge: false }));
+      await persistNow(next); // 双写，失败会抛出并保留检查点
+      await clearPendingCheckpoint(counts);
+      setPendingCheckpoint(null);
+      setCheckpointHistory(listCheckpointHistory());
+      setMergePlan(null);
+      return { ok: true, counts };
+    } catch (error) {
+      const message = `写入本地库失败：${error instanceof Error ? error.message : String(error)}。已保留检查点，可重试应用或整包撤回。`;
+      setMergeError(message);
+      return { ok: false, error: message };
+    }
+  };
+
+  const cancelImportedPackage = () => {
+    setMergePlan(null);
+    setMergeError(null);
+    void discardPendingCheckpoint();
+    setPendingCheckpoint(null);
+  };
+
+  /** 重开时继续应用上次未完成的合并 */
+  const resumePendingCheckpoint = (): MergePlan | null => {
+    const pending = pendingCheckpoint();
+    if (!pending) return null;
+    setMergePlan(pending.plan);
+    setMergeError(null);
+    return pending.plan;
+  };
+
+  const hasPendingCheckpoint = () => pendingCheckpoint() !== null;
+
+  /** 从检查点恢复到应用前的状态（整包撤回） */
+  const rollbackPendingCheckpoint = async () => {
+    const pending = await loadPendingCheckpoint();
+    if (!pending) return;
+    const before = cloneState(pending.before);
+    setUndoStack([]);
+    setRedoStack([]);
+    setState(reconcile(before, { merge: false }));
+    await persistNow(before);
+    await markCheckpointRolledBack();
+    setPendingCheckpoint(null);
+    setCheckpointHistory(listCheckpointHistory());
+    setMergePlan(null);
+    setMergeError(null);
+  };
+
   const orderedThemes = () => buildTreeOrder(state.themes);
 
   return {
@@ -342,6 +571,23 @@ export function useCodingStore() {
     keepLocalVersion,
     applyRemoteVersion,
     storageReady,
-    lastSavedAt
+    lastSavedAt,
+    // 离线编码包
+    sendOfflinePackage,
+    openOfflinePackage,
+    returnOfflinePackage,
+    exitOfflineSession,
+    offlineSession,
+    // 合并与检查点
+    importReturnedPackage,
+    applyImportedPackage,
+    cancelImportedPackage,
+    resolveConflict,
+    resumePendingCheckpoint,
+    hasPendingCheckpoint,
+    rollbackPendingCheckpoint,
+    mergePlan,
+    mergeError,
+    checkpointHistory
   };
 }

@@ -5,6 +5,8 @@ import ThemeTree from './components/ThemeTree';
 import Inspector from './components/Inspector';
 import ImportDialog from './components/ImportDialog';
 import { CreateThemeDialog, MergeThemeDialog, SplitThemeDialog } from './components/ThemeDialogs';
+import OfflinePackageDialog from './components/OfflinePackageDialog';
+import MergePackagesDialog from './components/MergePackagesDialog';
 import { useCodingStore } from './store/coding-store';
 
 export default function App() {
@@ -15,6 +17,8 @@ export default function App() {
   const [mergeOpen, setMergeOpen] = createSignal(false);
   const [splitOpen, setSplitOpen] = createSignal(false);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
+  const [packageOpen, setPackageOpen] = createSignal(false);
+  const [mergePackageOpen, setMergePackageOpen] = createSignal(false);
 
   const activeSegments = createMemo(() => store.state.segments
     .filter((segment) => segment.transcriptId === store.state.activeTranscriptId)
@@ -89,6 +93,8 @@ export default function App() {
             <Button color="inherit" size="small" disabled={!store.canUndo()} onClick={store.undo}>撤销</Button>
             <Button color="inherit" size="small" disabled={!store.canRedo()} onClick={store.redo}>重做</Button>
             <Button variant="outlined" color="inherit" size="small" onClick={() => setImportOpen(true)}>导入转写</Button>
+            <Button variant="outlined" color="inherit" size="small" onClick={() => setPackageOpen(true)}>{store.offlineSession() ? '离线编码中' : '离线编码包'}</Button>
+            <Button variant="outlined" color="inherit" size="small" onClick={() => setMergePackageOpen(true)}>合并编码包</Button>
             <Button variant="contained" color="secondary" size="small" onClick={() => store.downloadExport('json')}>导出编码</Button>
           </div>
         </Toolbar>
@@ -101,6 +107,20 @@ export default function App() {
             <div><Button size="small" color="inherit" onClick={store.applyRemoteVersion}>载入其他标签页版本</Button><Button size="small" variant="contained" color="warning" onClick={store.keepLocalVersion}>保留本页并建立新修订</Button></div>
           </div>
         )}
+      </Show>
+
+      <Show when={store.offlineSession()}>
+        <div class="offline-banner" role="status">
+          <div><strong>离线编码模式</strong><span>当前库是工作包快照（基线 {store.offlineSession()?.issuedAt.slice(0, 10)}）。完工后请用“离线编码包 → 导出完成包”交回主库。</span></div>
+          <Button size="small" variant="contained" color="secondary" onClick={() => setPackageOpen(true)}>完成 / 退出</Button>
+        </div>
+      </Show>
+
+      <Show when={!store.offlineSession() && store.hasPendingCheckpoint()}>
+        <div class="checkpoint-banner" role="alert">
+          <div><strong>检测到上次未完成的编码包合并</strong><span>写入可能中断；数据未被半写。可以继续应用或从检查点整包撤回。</span></div>
+          <Button size="small" variant="contained" color="warning" onClick={() => setMergePackageOpen(true)}>继续处理</Button>
+        </div>
       </Show>
 
       <section class="project-strip">
@@ -141,6 +161,8 @@ export default function App() {
       </footer>
 
       <ImportDialog open={importOpen()} onClose={() => setImportOpen(false)} onImport={store.importTranscript} />
+      <OfflinePackageDialog store={store} open={packageOpen()} onClose={() => setPackageOpen(false)} />
+      <MergePackagesDialog store={store} open={mergePackageOpen()} onClose={() => setMergePackageOpen(false)} />
       <CreateThemeDialog store={store} open={createOpen()} parentId={createParent()} onClose={() => { setCreateOpen(false); setCreateParent(undefined); }} />
       <MergeThemeDialog store={store} open={mergeOpen()} onClose={() => setMergeOpen(false)} />
       <SplitThemeDialog store={store} open={splitOpen()} onClose={() => setSplitOpen(false)} />
