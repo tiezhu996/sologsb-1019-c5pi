@@ -17,6 +17,8 @@ export interface Segment {
   speaker: string;
   time: string;
   text: string;
+  /** 归一化原文指纹，用于离线合并时跨库对齐同一段；旧数据会在载入时回填 */
+  fingerprint?: string;
   assignments: Record<CoderId, string[]>;
   note: string;
 }
@@ -27,6 +29,8 @@ export interface Transcript {
   participant: string;
   importedAt: string;
   sourceName: string;
+  /** 访谈来源稳定键（来源文件 + 标题派生），跨库识别同一篇访谈 */
+  sourceKey?: string;
 }
 
 export interface CodingState {

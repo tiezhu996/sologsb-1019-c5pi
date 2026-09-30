@@ -2,7 +2,19 @@ import { createEffect, createSignal } from 'solid-js';
 import { createStore, reconcile, unwrap } from 'solid-js/store';
 import { seedState } from '../data/seed';
 import type { CoderId, CodingState, PersistedEnvelope, Segment, Theme } from '../types';
-import { readEnvelope, writeEnvelope } from '../utils/db';
+import { clearCheckpoint, readCheckpoint, readEnvelope, writeCheckpoint, writeEnvelope } from '../utils/db';
+import { ensureAlignmentFields } from '../merge/fingerprint';
+import {
+  applyMerge,
+  buildPackage,
+  parsePackage,
+  prepareMerge,
+  rollbackState,
+  setConflictResolution,
+  acknowledgeReview,
+  type ManualLinks
+} from '../merge/engine';
+import type { CodingPackage, MergeCheckpoint, MergePlan, ResolutionChoice } from '../merge/types';
 
 const STORAGE_KEY = 'sologsb-1019-state-v1';
 const TAB_ID = crypto.randomUUID();
@@ -25,6 +37,7 @@ const [redoStack, setRedoStack] = createSignal<CodingState[]>([]);
 const [remoteEnvelope, setRemoteEnvelope] = createSignal<PersistedEnvelope | null>(null);
 const [storageReady, setStorageReady] = createSignal(false);
 const [lastSavedAt, setLastSavedAt] = createSignal<Date | null>(null);
+const [pendingCheckpoint, setPendingCheckpoint] = createSignal<MergeCheckpoint | null>(null);
 let channel: BroadcastChannel | null = null;
 let hydrating = false;
 let saveTimer: number | undefined;
@@ -95,6 +108,19 @@ export function useCodingStore() {
       const local = cloneState(state);
       if (stored && (stored.revision > local.revision || stored.updatedAt > local.updatedAt)) {
         setRemoteEnvelope(stored);
+      }
+
+      // 旧数据一次性回填对齐字段（访谈来源键 + 原文指纹）
+      const backfilled = cloneState(state);
+      const { changed } = ensureAlignmentFields(backfilled.transcripts, backfilled.segments);
+      if (changed) setState(reconcile(backfilled, { merge: false }));
+
+      // 崩溃恢复：上次合并若停在“已算出结果但尚未确认落盘”，重开时让研究者继续应用或撤回整包
+      const checkpoint = await readCheckpoint();
+      if (checkpoint && checkpoint.status !== 'committed' && checkpoint.status !== 'rolled-back') {
+        setPendingCheckpoint(checkpoint);
+      } else if (checkpoint) {
+        await clearCheckpoint();
       }
     } finally {
       setStorageReady(true);
@@ -314,6 +340,153 @@ export function useCodingStore() {
 
   const orderedThemes = () => buildTreeOrder(state.themes);
 
+  // —————————————— 离线编码包 ——————————————
+
+  /** 为指定编码员导出离线编码包（含原文指纹、来源键与下发基线） */
+  const exportCodingPackage = (coder: CoderId, note?: string) => {
+    const pack = buildPackage(cloneState(state), coder, note);
+    const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `离线编码包-${coder}-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /** 读入编码包并预演合并，返回计划供界面审阅；非法/旧包返回错误文案或迁移清单 */
+  const previewPackage = async (raw: string): Promise<{ ok: true; plan: MergePlan; pkg: CodingPackage } | { ok: false; error: string }> => {
+    const parsed = parsePackage(raw);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    const plan = prepareMerge(cloneState(state), parsed.pkg);
+    return { ok: true, plan, pkg: parsed.pkg };
+  };
+
+  /** 重新预演（研究者调整手工对齐后），保留已做裁决 */
+  const repreview = (pkg: CodingPackage, manual: ManualLinks, prior?: MergePlan): MergePlan => {
+    const plan = prepareMerge(cloneState(state), pkg, manual);
+    if (prior) {
+      plan.conflicts.forEach((conflict) => {
+        const previous = prior.conflicts.find((item) => item.id === conflict.id && item.resolution !== 'pending');
+        if (previous) conflict.resolution = previous.resolution;
+      });
+      plan.reviews.forEach((review) => {
+        const previous = prior.reviews.find((item) => item.id === review.id);
+        if (previous) review.acknowledged = previous.acknowledged;
+      });
+    }
+    return plan;
+  };
+
+  const resolveConflict = (plan: MergePlan, conflictId: string, resolution: Exclude<ResolutionChoice, 'pending'>) =>
+    setConflictResolution(plan, conflictId, resolution);
+  const markReview = (plan: MergePlan, reviewId: string, acknowledged: boolean) => acknowledgeReview(plan, reviewId, acknowledged);
+
+  /**
+   * 提交合并：先把检查点（合并前快照 + 计划 + 包）原子写入 IndexedDB，
+   * 确认持久化成功后才改写内存并触发常规保存；任一步失败都可用检查点整包撤回。
+   */
+  const commitMerge = async (pkg: CodingPackage, plan: MergePlan): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const beforeState = cloneState(state);
+    let afterState: CodingState;
+    try {
+      afterState = applyMerge(beforeState, pkg, plan);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : '合并计划存在未解决项。' };
+    }
+
+    const checkpoint: MergeCheckpoint = {
+      id: `cp-${crypto.randomUUID()}`,
+      createdAt: new Date().toISOString(),
+      package: pkg,
+      plan,
+      beforeState,
+      afterState,
+      status: 'applied-pending-write',
+      revisionBefore: beforeState.revision,
+      revisionAfter: afterState.revision
+    };
+    try {
+      await writeCheckpoint(checkpoint);
+    } catch (error) {
+      return { ok: false, error: `检查点写入失败，已取消合并，当前库未改动：${error instanceof Error ? error.message : String(error)}` };
+    }
+
+    setUndoStack((items) => [...items.slice(-49), beforeState]);
+    setRedoStack([]);
+    setState(reconcile(afterState, { merge: false }));
+    persist(afterState);
+    setPendingCheckpoint(checkpoint);
+
+    // 常规持久化（IndexedDB + localStorage）成功后再把检查点标记为 committed；
+    // 若在此处崩溃/断电，重开时检查点仍是 applied-pending-write，可继续应用或撤回。
+    window.setTimeout(() => {
+      void writeEnvelope({
+        revision: afterState.revision,
+        updatedAt: afterState.updatedAt,
+        writerId: TAB_ID,
+        state: afterState
+      })
+        .then(() => clearCheckpoint())
+        .then(() => setPendingCheckpoint(null))
+        .catch((error: unknown) => {
+          checkpoint.lastError = error instanceof Error ? error.message : String(error);
+          void writeCheckpoint(checkpoint).catch(() => undefined);
+        });
+    }, 220);
+    return { ok: true };
+  };
+
+  /** 重开后继续应用：检查点里已有合并后状态，直接重新落盘 */
+  const resumeCheckpoint = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const checkpoint = pendingCheckpoint();
+    if (!checkpoint?.afterState) return { ok: false, error: '没有可继续的合并检查点。' };
+    const afterState = cloneState(checkpoint.afterState);
+    try {
+      await writeEnvelope({
+        revision: afterState.revision,
+        updatedAt: afterState.updatedAt,
+        writerId: TAB_ID,
+        state: afterState
+      });
+      setUndoStack((items) => [...items.slice(-49), cloneState(state)]);
+      setRedoStack([]);
+      setState(reconcile(afterState, { merge: false }));
+      await clearCheckpoint();
+      setPendingCheckpoint(null);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: `继续应用失败，可改选“撤回整包”：${error instanceof Error ? error.message : String(error)}` };
+    }
+  };
+
+  /** 整包撤回：恢复到检查点记录的合并前状态并落盘清除检查点 */
+  const rollbackCheckpoint = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const checkpoint = pendingCheckpoint();
+    if (!checkpoint) return { ok: false, error: '没有可撤回的合并检查点。' };
+    const restored = rollbackState(cloneState(checkpoint.beforeState));
+    try {
+      await writeEnvelope({
+        revision: restored.revision,
+        updatedAt: restored.updatedAt,
+        writerId: TAB_ID,
+        state: restored
+      });
+      setUndoStack((items) => [...items.slice(-49), cloneState(state)]);
+      setRedoStack([]);
+      setState(reconcile(restored, { merge: false }));
+      const cleared: MergeCheckpoint = { ...checkpoint, status: 'rolled-back' };
+      await writeCheckpoint(cleared);
+      await clearCheckpoint();
+      setPendingCheckpoint(null);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: `撤回失败，检查点仍保留可重试：${error instanceof Error ? error.message : String(error)}` };
+    }
+  };
+
+  const dismissCheckpointBanner = () => setPendingCheckpoint(null);
+
   return {
     state,
     initialize,
@@ -336,6 +509,16 @@ export function useCodingStore() {
     importTranscript,
     addExample,
     exportCoding,
+    exportCodingPackage,
+    previewPackage,
+    repreview,
+    resolveConflict,
+    markReview,
+    commitMerge,
+    resumeCheckpoint,
+    rollbackCheckpoint,
+    dismissCheckpointBanner,
+    pendingCheckpoint,
     downloadExport,
     orderedThemes,
     remoteEnvelope,

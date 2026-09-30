@@ -4,6 +4,7 @@ import TranscriptPanel from './components/TranscriptPanel';
 import ThemeTree from './components/ThemeTree';
 import Inspector from './components/Inspector';
 import ImportDialog from './components/ImportDialog';
+import MergeDialog from './components/MergeDialog';
 import { CreateThemeDialog, MergeThemeDialog, SplitThemeDialog } from './components/ThemeDialogs';
 import { useCodingStore } from './store/coding-store';
 
@@ -89,6 +90,7 @@ export default function App() {
             <Button color="inherit" size="small" disabled={!store.canUndo()} onClick={store.undo}>撤销</Button>
             <Button color="inherit" size="small" disabled={!store.canRedo()} onClick={store.redo}>重做</Button>
             <Button variant="outlined" color="inherit" size="small" onClick={() => setImportOpen(true)}>导入转写</Button>
+            <Button variant="outlined" color="inherit" size="small" onClick={() => setMergeOpen(true)}>合并编码包</Button>
             <Button variant="contained" color="secondary" size="small" onClick={() => store.downloadExport('json')}>导出编码</Button>
           </div>
         </Toolbar>
@@ -99,6 +101,26 @@ export default function App() {
           <div class="conflict-banner" role="alert">
             <div><strong>另一个标签页写入了较新的版本</strong><span>本地数据库修订 r{remote().revision}。系统没有自动覆盖任何数据，请明确选择保留哪一份。</span></div>
             <div><Button size="small" color="inherit" onClick={store.applyRemoteVersion}>载入其他标签页版本</Button><Button size="small" variant="contained" color="warning" onClick={store.keepLocalVersion}>保留本页并建立新修订</Button></div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={store.pendingCheckpoint()}>
+        {(checkpoint) => (
+          <div class="checkpoint-banner" role="alert">
+            <div>
+              <strong>检测到未完成的离线合并</strong>
+              <span>
+                上次合并「{checkpoint().plan.coderName}（编码员 {checkpoint().plan.coder}）」已在 {new Date(checkpoint().createdAt).toLocaleString('zh-CN')} 写入检查点
+                {checkpoint().lastError ? `，但落盘时出错：${checkpoint().lastError}` : '，重开前未确认完成'}。
+                可继续应用，或撤回整包恢复到合并前状态，数据不会丢失。
+              </span>
+            </div>
+            <div>
+              <Button size="small" color="inherit" onClick={() => { void store.resumeCheckpoint(); }}>继续应用</Button>
+              <Button size="small" variant="contained" color="warning" onClick={() => { void store.rollbackCheckpoint(); }}>撤回整包</Button>
+              <Button size="small" color="inherit" onClick={store.dismissCheckpointBanner}>稍后处理</Button>
+            </div>
           </div>
         )}
       </Show>
@@ -141,6 +163,7 @@ export default function App() {
       </footer>
 
       <ImportDialog open={importOpen()} onClose={() => setImportOpen(false)} onImport={store.importTranscript} />
+      <MergeDialog store={store} open={mergeOpen()} onClose={() => setMergeOpen(false)} />
       <CreateThemeDialog store={store} open={createOpen()} parentId={createParent()} onClose={() => { setCreateOpen(false); setCreateParent(undefined); }} />
       <MergeThemeDialog store={store} open={mergeOpen()} onClose={() => setMergeOpen(false)} />
       <SplitThemeDialog store={store} open={splitOpen()} onClose={() => setSplitOpen(false)} />
